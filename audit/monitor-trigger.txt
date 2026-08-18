@@ -1,0 +1,1 @@
+Record the first complete successful audit run, or preserve failed-step logs if all current runs fail.
