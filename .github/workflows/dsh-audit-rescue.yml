@@ -1,0 +1,205 @@
+name: Rescue partial DSH audit rows 1-2000
+
+on:
+  push:
+    branches:
+      - dsh-audit-1-2000-output
+    paths:
+      - audit-output-v2/dsh_plugins_audit_1_2000_all_results.json
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dsh-audit-1-2000-rescue
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dsh-audit-1-2000-output
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Select every partial, failed, timed-out or unavailable target
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile audit/scanner.py audit/rules.py audit/rescue_merge.py
+          mkdir -p rescue-targets
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          retry_statuses={
+              'scanned_partial','source_read_failed','tree_read_failed','clone_timeout',
+              'network_error','clone_failed','internal_error','scan_result_missing','unavailable',
+          }
+          values=json.loads(Path('audit-output-v2/dsh_plugins_audit_1_2000_all_results.json').read_text(encoding='utf-8'))
+          assert len(values)==2000
+          selected=[]
+          identity=('row','target_id','name','url','repo_full_name','description','star','fork')
+          for value in values:
+              if str(value.get('status')) in retry_statuses:
+                  selected.append({key:value.get(key) for key in identity})
+          Path('rescue-targets/retry_targets.json').write_text(json.dumps(selected,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          Path('rescue-targets/retry_meta.json').write_text(json.dumps({
+              'target_count':len(values),'retry_target_count':len(selected),
+              'retry_rows':[x['row'] for x in selected],
+          },ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(f'retry targets: {len(selected)}')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-rescue-targets
+          path: rescue-targets/
+          retention-days: 2
+          if-no-files-found: error
+
+  scan:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dsh-audit-1-2000-output
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: dsh-rescue-targets
+          path: rescue-targets
+      - name: Select deterministic rescue shard
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/rescue-${SHARD}
+          python - <<'PY'
+          import json,os
+          from pathlib import Path
+          shard=int(os.environ['SHARD'])
+          values=json.loads(Path('rescue-targets/retry_targets.json').read_text(encoding='utf-8'))
+          selected=values[shard::20]
+          Path('work/targets.json').write_text(json.dumps(selected,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          Path(f'work/rescue-{shard}/selected.json').write_text(json.dumps({
+              'shard':shard,'count':len(selected),'rows':[x['row'] for x in selected]
+          },ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+      - name: Expanded-limit read-only rescan
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          count="$(python - <<'PY'
+          import json
+          print(len(json.load(open('work/targets.json',encoding='utf-8'))))
+          PY
+          )"
+          if test "$count" = 0; then
+            : > "work/rescue-${SHARD}/results.jsonl"
+            printf '{"target_count":0,"result_count":0}\n' > "work/rescue-${SHARD}/chunk_summary.json"
+            exit 0
+          fi
+          success=0
+          for attempt in 1 2; do
+            rm -f "work/rescue-${SHARD}/results.jsonl" "work/rescue-${SHARD}/chunk_summary.json"
+            if python audit/scanner.py \
+              --targets work/targets.json \
+              --output-dir "work/rescue-${SHARD}" \
+              --workers 3 \
+              --clone-timeout 180 \
+              --max-files 15000 \
+              --max-total-bytes 250000000 \
+              --max-file-bytes 5000000 \
+              --hard-file-bytes 32000000; then
+              success=1
+              break
+            fi
+            sleep 20
+          done
+          test "$success" = 1
+      - name: Upload rescue shard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-rescue-shard-${{ matrix.shard }}
+          path: work/rescue-${{ matrix.shard }}/
+          retention-days: 2
+          if-no-files-found: warn
+
+  merge:
+    needs: [prepare, scan]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dsh-audit-1-2000-output
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: dsh-rescue-targets
+          path: rescue-targets
+      - name: Download every rescue shard
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dsh-rescue-shard-*
+          path: rescue-artifacts
+      - name: Merge only improved results and enforce full accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf rescue-final
+          mkdir -p rescue-final
+          python audit/rescue_merge.py \
+            --original audit-output-v2/dsh_plugins_audit_1_2000_all_results.json \
+            --rescue-dir rescue-artifacts \
+            --output rescue-final/dsh_plugins_audit_1_2000_all_results_rescued.json \
+            --summary-output rescue-final/dsh_plugins_audit_1_2000_rescue_summary.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          rows=json.loads(Path('rescue-final/dsh_plugins_audit_1_2000_all_results_rescued.json').read_text(encoding='utf-8'))
+          s=json.loads(Path('rescue-final/dsh_plugins_audit_1_2000_rescue_summary.json').read_text(encoding='utf-8'))
+          assert len(rows)==2000
+          assert [x['row'] for x in rows]==list(range(1,2001))
+          assert s['missing_rescue_result_count']==0
+          assert s['validation_errors']==[]
+          PY
+      - name: Commit rescued result set
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p audit-output-rescue
+          cp rescue-final/* audit-output-rescue/
+          printf '%s\n' "$GITHUB_RUN_ID" > audit-output-rescue/rescue-run-id.txt
+          git config user.name 'dsh audit rescue'
+          git config user.email 'actions@github.com'
+          git add audit-output-rescue/
+          git diff --cached --quiet || git commit -m 'audit-output: expanded-limit rescue of partial DSH scans'
+          git pull --rebase origin dsh-audit-1-2000-output
+          git push origin HEAD:dsh-audit-1-2000-output
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-audit-1-2000-rescued-results
+          path: rescue-final/
+          retention-days: 2
+          if-no-files-found: error
