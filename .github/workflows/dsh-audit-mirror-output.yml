@@ -1,0 +1,25 @@
+name: Mirror DSH audit output branch
+
+on:
+  push:
+    branches:
+      - chatgpt/dsh-audit-1-2000-20260818
+    paths:
+      - audit-output/**
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chatgpt/dsh-audit-1-2000-20260818
+          fetch-depth: 0
+      - name: Force-update slash-free temporary output branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push --force origin HEAD:refs/heads/dsh-audit-1-2000-output
