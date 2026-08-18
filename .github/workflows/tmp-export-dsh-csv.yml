@@ -1,0 +1,203 @@
+name: temporary DSH CSV export
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch current DSH registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 --retry-all-errors \
+            https://raw.githubusercontent.com/zp-home/dsh-recommend/main/data/registry.json \
+            -o registry.json
+
+      - name: Build and validate deduplicated CSV
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/export.py <<'PY'
+          import csv
+          import hashlib
+          import json
+          import re
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          SOURCE_URL = "https://github.com/zp-home/dsh-recommend/blob/main/data/registry.json"
+          SOURCE_FILE = Path("registry.json")
+          OUTPUT_FILE = Path("github_dsh_plugins_deduplicated.csv")
+          AUDIT_FILE = Path("github_dsh_plugins_deduplicated_audit.json")
+          FIELDS = ["name", "url", "description", "star", "fork"]
+
+
+          def canonical_url(value: object) -> str:
+              url = str(value or "").strip()
+              url = re.sub(r"^http://github\.com/", "https://github.com/", url, flags=re.I)
+              url = re.sub(r"\.git/?$", "", url, flags=re.I)
+              return url.rstrip("/").lower()
+
+
+          def display_url(value: object) -> str:
+              url = str(value or "").strip()
+              url = re.sub(r"^http://github\.com/", "https://github.com/", url, flags=re.I)
+              url = re.sub(r"\.git/?$", "", url, flags=re.I)
+              return url.rstrip("/")
+
+
+          def nonnegative_int(value: object) -> int:
+              try:
+                  return max(0, int(value or 0))
+              except (TypeError, ValueError, OverflowError):
+                  return 0
+
+
+          payload = json.loads(SOURCE_FILE.read_text(encoding="utf-8"))
+          if not isinstance(payload, dict) or not isinstance(payload.get("plugins"), list):
+              raise SystemExit("Unexpected registry format: missing plugins array")
+
+          plugins = payload["plugins"]
+          by_url: dict[str, dict[str, object]] = {}
+          duplicate_input_count = 0
+          invalid_input_count = 0
+
+          for plugin in plugins:
+              if not isinstance(plugin, dict):
+                  invalid_input_count += 1
+                  continue
+
+              name = str(plugin.get("name") or "").strip()
+              url = display_url(plugin.get("url"))
+              key = canonical_url(url)
+              description = str(plugin.get("description") or "").strip()
+              star = nonnegative_int(plugin.get("stars", plugin.get("star", 0)))
+              fork = nonnegative_int(plugin.get("forks", plugin.get("fork", 0)))
+
+              if not name or not key:
+                  invalid_input_count += 1
+                  continue
+
+              row = {
+                  "name": name,
+                  "url": url,
+                  "description": description,
+                  "star": star,
+                  "fork": fork,
+              }
+
+              existing = by_url.get(key)
+              if existing is None:
+                  by_url[key] = row
+                  continue
+
+              duplicate_input_count += 1
+              existing["star"] = max(int(existing["star"]), star)
+              existing["fork"] = max(int(existing["fork"]), fork)
+              if len(description) > len(str(existing["description"])):
+                  existing["description"] = description
+              if len(name) > len(str(existing["name"])):
+                  existing["name"] = name
+
+          rows = sorted(
+              by_url.values(),
+              key=lambda row: (
+                  -int(row["star"]),
+                  -int(row["fork"]),
+                  str(row["name"]).casefold(),
+                  str(row["url"]).casefold(),
+              ),
+          )
+
+          with OUTPUT_FILE.open("w", encoding="utf-8-sig", newline="") as handle:
+              writer = csv.DictWriter(handle, fieldnames=FIELDS, lineterminator="\n")
+              writer.writeheader()
+              writer.writerows(rows)
+
+          # Re-read the finished CSV so the audit checks the actual artifact, not only memory.
+          with OUTPUT_FILE.open("r", encoding="utf-8-sig", newline="") as handle:
+              reader = csv.DictReader(handle)
+              actual_header = reader.fieldnames
+              actual_rows = list(reader)
+
+          seen: set[str] = set()
+          duplicate_output_count = 0
+          invalid_output_count = 0
+          for row in actual_rows:
+              key = canonical_url(row.get("url"))
+              if key in seen:
+                  duplicate_output_count += 1
+              seen.add(key)
+              try:
+                  star = int(row.get("star", ""))
+                  fork = int(row.get("fork", ""))
+              except (TypeError, ValueError):
+                  invalid_output_count += 1
+                  continue
+              if (
+                  not str(row.get("name") or "").strip()
+                  or not key
+                  or star < 0
+                  or fork < 0
+              ):
+                  invalid_output_count += 1
+
+          source_count = payload.get("meta", {}).get("counts", {}).get("topicRepos")
+          audit = {
+              "source": SOURCE_URL,
+              "source_generated_at": payload.get("meta", {}).get("generatedAt"),
+              "source_raw_fetched_at": payload.get("meta", {}).get("rawFetchedAt"),
+              "source_declared_count": source_count,
+              "input_count": len(plugins),
+              "output_count": len(actual_rows),
+              "duplicate_input_count": duplicate_input_count,
+              "invalid_input_count": invalid_input_count,
+              "duplicate_output_count": duplicate_output_count,
+              "invalid_output_count": invalid_output_count,
+              "header": actual_header,
+              "encoding": "UTF-8 with BOM",
+              "deduplication_key": "canonical GitHub repository URL",
+              "sort": "star desc, fork desc, name asc, url asc",
+              "csv_sha256": hashlib.sha256(OUTPUT_FILE.read_bytes()).hexdigest(),
+              "generated_at": datetime.now(timezone.utc).isoformat(),
+          }
+          AUDIT_FILE.write_text(
+              json.dumps(audit, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          errors = []
+          if actual_header != FIELDS:
+              errors.append(f"header mismatch: {actual_header!r}")
+          if duplicate_output_count:
+              errors.append(f"duplicate output URLs: {duplicate_output_count}")
+          if invalid_output_count:
+              errors.append(f"invalid output rows: {invalid_output_count}")
+          if source_count is not None and int(source_count) != len(plugins):
+              errors.append(
+                  f"source declared {source_count} rows but plugins contains {len(plugins)}"
+              )
+          if len(actual_rows) != len(seen):
+              errors.append("output row count does not equal unique URL count")
+          if errors:
+              raise SystemExit("; ".join(errors))
+
+          print(json.dumps(audit, ensure_ascii=False))
+          PY
+          python3 /tmp/export.py
+
+      - name: Upload CSV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: github-dsh-plugins-deduplicated
+          path: |
+            github_dsh_plugins_deduplicated.csv
+            github_dsh_plugins_deduplicated_audit.json
+          retention-days: 1
+          if-no-files-found: error
