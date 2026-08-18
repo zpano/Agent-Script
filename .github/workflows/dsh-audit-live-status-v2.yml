@@ -1,0 +1,42 @@
+name: Snapshot DSH audit live status v2
+
+on:
+  push:
+    branches:
+      - chatgpt/dsh-audit-1-2000-20260818
+    paths:
+      - audit/live2-trigger.txt
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chatgpt/dsh-audit-1-2000-20260818
+          fetch-depth: 0
+      - name: Capture audit workflow status
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p audit-output
+          gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow "DSH static audit rows 1-2000" \
+            --branch "chatgpt/dsh-audit-1-2000-20260818" \
+            --event pull_request \
+            --limit 20 \
+            --json databaseId,status,conclusion,createdAt,updatedAt,headSha,url \
+            > audit-output/live-status.json
+          git config user.name "dsh audit status"
+          git config user.email "actions@github.com"
+          git add audit-output/live-status.json
+          git commit -m "audit-output: refresh DSH workflow live status"
+          git pull --rebase origin chatgpt/dsh-audit-1-2000-20260818
+          git push origin HEAD:chatgpt/dsh-audit-1-2000-20260818

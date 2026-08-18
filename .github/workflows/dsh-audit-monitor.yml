@@ -1,0 +1,91 @@
+name: Monitor DSH audit run
+
+on:
+  push:
+    branches:
+      - chatgpt/dsh-audit-1-2000-20260818
+    paths:
+      - audit/monitor-trigger.txt
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chatgpt/dsh-audit-1-2000-20260818
+          fetch-depth: 0
+      - name: Wait for all current audit runs to settle and record outcome
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p audit-output
+          for attempt in $(seq 1 360); do
+            gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "DSH static audit rows 1-2000" \
+              --branch "chatgpt/dsh-audit-1-2000-20260818" \
+              --event pull_request \
+              --limit 20 \
+              --json databaseId,status,conclusion,createdAt,headSha \
+              > /tmp/runs.json
+
+            python - <<'PY' > /tmp/state.env
+          import json
+          from pathlib import Path
+
+          runs = json.loads(Path('/tmp/runs.json').read_text())
+          successful = [r for r in runs if r.get('conclusion') == 'success']
+          active = [r for r in runs if r.get('status') in {'queued', 'in_progress', 'waiting', 'pending'}]
+          completed = [r for r in runs if r.get('status') == 'completed']
+          latest = runs[0] if runs else {}
+          print(f"SUCCESS_ID={successful[0]['databaseId'] if successful else ''}")
+          print(f"ACTIVE_COUNT={len(active)}")
+          print(f"COMPLETED_COUNT={len(completed)}")
+          print(f"LATEST_ID={latest.get('databaseId', '')}")
+          print(f"LATEST_CONCLUSION={latest.get('conclusion') or ''}")
+          PY
+            source /tmp/state.env
+
+            if test -n "$SUCCESS_ID"; then
+              cp /tmp/runs.json audit-output/monitor-status.json
+              echo "$SUCCESS_ID" > audit-output/successful-run-id.txt
+              break
+            fi
+            if test "$ACTIVE_COUNT" -gt 0 || test "$COMPLETED_COUNT" -eq 0; then
+              sleep 30
+              continue
+            fi
+
+            cp /tmp/runs.json audit-output/monitor-status.json
+            if test -n "$LATEST_ID"; then
+              gh run view "$LATEST_ID" --repo "$GITHUB_REPOSITORY" --log-failed \
+                > audit-output/failed-run.log 2>&1 || true
+            fi
+            echo "all observed audit runs completed without success" > audit-output/failure.txt
+            break
+          done
+
+          if ! test -f audit-output/monitor-status.json; then
+            cp /tmp/runs.json audit-output/monitor-status.json
+            echo "monitor polling limit reached" > audit-output/failure.txt
+          fi
+
+      - name: Commit monitor outcome
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "dsh audit monitor"
+          git config user.email "actions@github.com"
+          git add audit-output/
+          git diff --cached --quiet && exit 0
+          git commit -m "audit-output: record DSH scan workflow status"
+          git pull --rebase origin chatgpt/dsh-audit-1-2000-20260818
+          git push origin HEAD:chatgpt/dsh-audit-1-2000-20260818

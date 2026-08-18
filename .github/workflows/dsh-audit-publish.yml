@@ -1,0 +1,92 @@
+name: Publish DSH audit artifact
+
+on:
+  push:
+    branches:
+      - chatgpt/dsh-audit-1-2000-20260818
+    paths:
+      - audit/publish-trigger.txt
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chatgpt/dsh-audit-1-2000-20260818
+          fetch-depth: 0
+      - name: Locate a successful complete audit run and download its final artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -f audit-output/dsh-audit-1-2000-preliminary.zip; then
+            echo "published artifact already exists"
+            exit 0
+          fi
+
+          run_id=""
+          for attempt in $(seq 1 360); do
+            run_id="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "DSH static audit rows 1-2000" \
+              --branch "chatgpt/dsh-audit-1-2000-20260818" \
+              --event pull_request \
+              --status completed \
+              --limit 30 \
+              --json databaseId,conclusion,createdAt \
+              --jq '[.[] | select(.conclusion == "success")][0].databaseId // ""')"
+            if test -n "$run_id"; then
+              rm -rf downloaded
+              mkdir -p downloaded
+              if gh run download "$run_id" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name dsh-audit-1-2000-preliminary \
+                --dir downloaded; then
+                break
+              fi
+            fi
+            run_id=""
+            sleep 30
+          done
+
+          if test -z "$run_id"; then
+            echo "no successful complete audit run became available" >&2
+            exit 1
+          fi
+          test "$(cat downloaded/aggregate_exit_code.txt)" = "0"
+          echo "$run_id" > downloaded/source_workflow_run_id.txt
+
+      - name: Package and publish fixed-path artifacts on the temporary branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -f audit-output/dsh-audit-1-2000-preliminary.zip; then
+            exit 0
+          fi
+          mkdir -p audit-output
+          python -m zipfile -c \
+            audit-output/dsh-audit-1-2000-preliminary.zip \
+            downloaded/dsh_plugins_audit_1_2000_preliminary.md \
+            downloaded/dsh_plugins_audit_1_2000_coverage.csv \
+            downloaded/dsh_plugins_audit_1_2000_preliminary_findings.json \
+            downloaded/dsh_plugins_audit_1_2000_all_results.json \
+            downloaded/dsh_plugins_audit_1_2000_summary.json \
+            downloaded/aggregate_exit_code.txt \
+            downloaded/source_workflow_run_id.txt
+          cp downloaded/dsh_plugins_audit_1_2000_summary.json audit-output/status.json
+          cp downloaded/dsh_plugins_audit_1_2000_preliminary.md audit-output/preliminary-report.md
+          cp downloaded/dsh_plugins_audit_1_2000_coverage.csv audit-output/coverage.csv
+
+          git config user.name "dsh audit bot"
+          git config user.email "actions@github.com"
+          git add audit-output/
+          git commit -m "audit-output: publish DSH rows 1-2000 preliminary results"
+          git pull --rebase origin chatgpt/dsh-audit-1-2000-20260818
+          git push origin HEAD:chatgpt/dsh-audit-1-2000-20260818
