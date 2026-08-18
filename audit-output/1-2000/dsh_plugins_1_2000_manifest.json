@@ -1,0 +1,62 @@
+{
+  "scope": "CSV data rows 1-2000 (header excluded)",
+  "source_url": "https://raw.githubusercontent.com/zp-home/dsh-recommend/4591632cbf97aba66f2b2b81f778f976ab2c3e49/data/registry.json",
+  "source_commit": "4591632cbf97aba66f2b2b81f778f976ab2c3e49",
+  "source_generated_at": "2026-08-18T12:27:19.361Z",
+  "source_raw_fetched_at": "2026-08-18T12:19:17.058Z",
+  "source_registry_sha256": "28c4829d07f2ab4b4ac5b62b657a214b0a7b8e2aaadae90ec75a9eb00dd39071",
+  "source_declared_count": 7195,
+  "source_plugins_array_count": 7195,
+  "deduplicated_count": 7195,
+  "target_count": 2000,
+  "target_jsonl_sha256": "2441c09522012b1f9d950e088cfaa63fdf81b2171c69591516795f238a4b2ba1",
+  "duplicate_input_count": 0,
+  "invalid_input_count": 0,
+  "deduplication_key": "canonical GitHub repository URL",
+  "sort": "star desc, fork desc, name case-insensitive asc, url case-insensitive asc",
+  "generated_at": "2026-08-18T23:38:31.450303+00:00",
+  "stats": {
+    "target_count": 2000,
+    "result_files": 100,
+    "raw_result_count": 2000,
+    "missing_indexes": [],
+    "duplicate_result_indexes": [],
+    "invalid_result_rows": 0,
+    "classification_counts": {
+      "HIGH_RISK": 313,
+      "INCOMPLETE_REVIEW": 6,
+      "LOW_REVIEW": 598,
+      "MEDIUM_RISK": 680,
+      "NO_HIGH_CONFIDENCE_SIGNAL": 279,
+      "SOURCE_INCOMPLETE": 113,
+      "SUSPECTED_MALICIOUS": 11
+    },
+    "fetch_status_counts": {
+      "ok": 2000
+    },
+    "scan_status_counts": {
+      "complete": 1820,
+      "not_scanned": 113,
+      "partial": 67
+    },
+    "finding_count": 1004
+  },
+  "outputs": {
+    "dsh_plugins_1_2000_security_audit.md": {
+      "sha256": "98738a449e044a425bcde832ecc522d1676c00b03874e76583936c5a5b1e4422",
+      "bytes": 3583142
+    },
+    "dsh_plugins_1_2000_coverage.csv": {
+      "sha256": "b8137f63d2d83db53d8bd48d461fdec41ecffa188a2d78f9ef559ce78282b7ad",
+      "bytes": 758751
+    },
+    "dsh_plugins_1_2000_findings.json": {
+      "sha256": "cbfc4d6ec3f77d3f4c827d5edd9b119e1f63a0b976c0b0cbb8441ee626ad3f8a",
+      "bytes": 6212535
+    },
+    "dsh_plugins_1_2000_results.jsonl": {
+      "sha256": "a82efc9e4cf4ec962a46f3bccf4517b8c3679f6759edc5e65ea785ab6c2c298f",
+      "bytes": 6789606
+    }
+  }
+}

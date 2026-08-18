@@ -1,0 +1,33 @@
+{
+  "success": true,
+  "generated_at": "2026-08-18T23:38:31.450303+00:00",
+  "target_count": 2000,
+  "coverage_rows": 2000,
+  "stats": {
+    "target_count": 2000,
+    "result_files": 100,
+    "raw_result_count": 2000,
+    "missing_indexes": [],
+    "duplicate_result_indexes": [],
+    "invalid_result_rows": 0,
+    "classification_counts": {
+      "HIGH_RISK": 313,
+      "INCOMPLETE_REVIEW": 6,
+      "LOW_REVIEW": 598,
+      "MEDIUM_RISK": 680,
+      "NO_HIGH_CONFIDENCE_SIGNAL": 279,
+      "SOURCE_INCOMPLETE": 113,
+      "SUSPECTED_MALICIOUS": 11
+    },
+    "fetch_status_counts": {
+      "ok": 2000
+    },
+    "scan_status_counts": {
+      "complete": 1820,
+      "not_scanned": 113,
+      "partial": 67
+    },
+    "finding_count": 1004
+  },
+  "manifest_sha256": "77d5f297bef150295c208a64b6930eb76d55f97c039074313ca5b5328219691c"
+}
