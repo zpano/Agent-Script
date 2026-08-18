@@ -7,7 +7,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: dsh-audit-4001-6000-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   PYTHONUNBUFFERED: "1"
@@ -94,10 +98,40 @@ jobs:
           print(json.dumps(summary, ensure_ascii=False, indent=2))
           PY
 
+      - name: Prepare durable result files
+        run: |
+          rm -rf audit-results
+          mkdir -p audit-results
+          cp final/dsh_plugins_4001_6000_security_audit.md audit-results/
+          cp final/dsh_plugins_4001_6000_full_ledger.csv audit-results/
+          cp final/dsh_plugins_4001_6000_findings.json audit-results/
+          cp final/SUMMARY.json audit-results/
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+          root = Path('audit-results')
+          with zipfile.ZipFile(root / 'dsh_plugins_4001_6000_audit_bundle.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              for name in [
+                  'dsh_plugins_4001_6000_security_audit.md',
+                  'dsh_plugins_4001_6000_full_ledger.csv',
+                  'dsh_plugins_4001_6000_findings.json',
+                  'SUMMARY.json',
+              ]:
+                  z.write(root / name, name)
+          PY
+
       - name: Upload final report bundle
         uses: actions/upload-artifact@v4
         with:
           name: dsh-audit-4001-6000
-          path: final
+          path: audit-results
           if-no-files-found: error
           retention-days: 1
+
+      - name: Commit result files to the isolated audit branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add audit-results
+          git diff --cached --quiet || git commit -m "audit results for DSH plugins 4001-6000 [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
