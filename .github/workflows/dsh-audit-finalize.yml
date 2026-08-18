@@ -1,0 +1,97 @@
+name: Finalize DSH audit rows 1-2000
+
+on:
+  push:
+    branches:
+      - dsh-audit-1-2000-output
+    paths:
+      - audit-output-v2/dsh_plugins_audit_1_2000_all_results.json
+      - audit-output-v2/dsh_plugins_audit_1_2000_summary.json
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dsh-audit-1-2000-finalize
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dsh-audit-1-2000-output
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Re-read every flagged evidence file at its pinned commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile audit/finalize.py
+          rm -rf final-reviewed
+          mkdir -p final-reviewed
+          python audit/finalize.py \
+            --all-results audit-output-v2/dsh_plugins_audit_1_2000_all_results.json \
+            --source-summary audit-output-v2/dsh_plugins_audit_1_2000_summary.json \
+            --output-dir final-reviewed
+      - name: Validate final report and exact 2000-row accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import csv, hashlib, json
+          from pathlib import Path
+          p=Path('final-reviewed')
+          s=json.loads((p/'dsh_plugins_security_audit_1_2000_summary.json').read_text(encoding='utf-8'))
+          assert s['target_count']==2000
+          assert sum(s['verdict_counts'].values())==2000
+          with (p/'dsh_plugins_security_audit_1_2000_coverage.csv').open(encoding='utf-8-sig',newline='') as f:
+              rows=list(csv.DictReader(f))
+          assert len(rows)==2000
+          assert [int(x['row']) for x in rows]==list(range(1,2001))
+          assert len({x['url'].rstrip('/').lower() for x in rows})==2000
+          report=(p/'dsh_plugins_security_audit_1_2000_final.md').read_text(encoding='utf-8')
+          assert '# DSH 插件源码安全审计报告' in report
+          assert '## 八、完整覆盖清单（2000/2000）' in report
+          print(json.dumps(s,ensure_ascii=False))
+          PY
+      - name: Package final report set
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m zipfile -c \
+            final-reviewed/dsh_plugins_security_audit_1_2000_final.zip \
+            final-reviewed/dsh_plugins_security_audit_1_2000_final.md \
+            final-reviewed/dsh_plugins_security_audit_1_2000_coverage.csv \
+            final-reviewed/dsh_plugins_security_audit_1_2000_findings.json \
+            final-reviewed/dsh_plugins_security_audit_1_2000_summary.json \
+            final-reviewed/dsh_plugins_security_audit_1_2000_source_review.json
+      - name: Commit final artifacts to slash-free temporary branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p audit-output-final
+          cp final-reviewed/dsh_plugins_security_audit_1_2000_final.md audit-output-final/
+          cp final-reviewed/dsh_plugins_security_audit_1_2000_coverage.csv audit-output-final/
+          cp final-reviewed/dsh_plugins_security_audit_1_2000_findings.json audit-output-final/
+          cp final-reviewed/dsh_plugins_security_audit_1_2000_summary.json audit-output-final/
+          cp final-reviewed/dsh_plugins_security_audit_1_2000_source_review.json audit-output-final/
+          cp final-reviewed/dsh_plugins_security_audit_1_2000_final.zip audit-output-final/
+          printf '%s\n' "$GITHUB_RUN_ID" > audit-output-final/finalizer-run-id.txt
+          git config user.name 'dsh audit finalizer'
+          git config user.email 'actions@github.com'
+          git add audit-output-final/
+          git diff --cached --quiet || git commit -m 'audit-output: final reviewed DSH rows 1-2000 report'
+          git pull --rebase origin dsh-audit-1-2000-output
+          git push origin HEAD:dsh-audit-1-2000-output
+      - name: Upload final reviewed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-plugins-security-audit-1-2000-final
+          path: final-reviewed/
+          retention-days: 2
+          if-no-files-found: error
