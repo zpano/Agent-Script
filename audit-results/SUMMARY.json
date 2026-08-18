@@ -1,0 +1,26 @@
+{
+  "scanner_version": "2026-08-18.4",
+  "total": 2000,
+  "verdict_counts": {
+    "high_risk": 1289,
+    "no_obvious_malicious_findings": 317,
+    "medium_risk": 337,
+    "malicious_candidate": 20,
+    "unavailable": 37
+  },
+  "scan_status_counts": {
+    "ok": 1406,
+    "ok_partial": 557,
+    "empty_repository": 37
+  },
+  "coverage_counts": {
+    "full_text_source": 1406,
+    "partial": 557,
+    "none": 37
+  },
+  "files": [
+    "dsh_plugins_4001_6000_security_audit.md",
+    "dsh_plugins_4001_6000_full_ledger.csv",
+    "dsh_plugins_4001_6000_findings.json"
+  ]
+}
