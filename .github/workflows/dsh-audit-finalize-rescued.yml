@@ -1,0 +1,136 @@
+name: Finalize rescued DSH audit rows 1-2000
+
+on:
+  push:
+    branches:
+      - dsh-audit-1-2000-output
+    paths:
+      - audit-output-rescue/dsh_plugins_audit_1_2000_all_results_rescued.json
+      - audit-output-rescue/dsh_plugins_audit_1_2000_rescue_summary.json
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dsh-audit-1-2000-finalize-rescued
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dsh-audit-1-2000-output
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Full-context review of the rescued result set
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf final-rescued
+          mkdir -p final-rescued
+          python audit/finalize.py \
+            --all-results audit-output-rescue/dsh_plugins_audit_1_2000_all_results_rescued.json \
+            --source-summary audit-output-v2/dsh_plugins_audit_1_2000_summary.json \
+            --output-dir final-rescued
+      - name: Attach rescue accounting to report and summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp audit-output-rescue/dsh_plugins_audit_1_2000_rescue_summary.json final-rescued/
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path('final-rescued')
+          rescue=json.loads((root/'dsh_plugins_audit_1_2000_rescue_summary.json').read_text(encoding='utf-8'))
+          summary_path=root/'dsh_plugins_security_audit_1_2000_summary.json'
+          summary=json.loads(summary_path.read_text(encoding='utf-8'))
+          summary['rescue_pass']={
+              'retry_target_count':rescue.get('retry_target_count',0),
+              'rescue_result_count':rescue.get('rescue_result_count',0),
+              'replaced_count':rescue.get('replaced_count',0),
+              'missing_rescue_result_count':rescue.get('missing_rescue_result_count',0),
+              'status_counts_before':rescue.get('status_counts_before',{}),
+              'status_counts_after':rescue.get('status_counts_after',{}),
+              'validation_errors':rescue.get('validation_errors',[]),
+          }
+          summary_path.write_text(json.dumps(summary,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          report_path=root/'dsh_plugins_security_audit_1_2000_final.md'
+          report=report_path.read_text(encoding='utf-8')
+          needle='- 第二阶段按每个仓库扫描时的 commit 重新读取证据文件，扩大上下文并验证行号；安全研究、审计、CTF、恶意软件分析类仓库不会仅因包含攻击原语而被定性为作者恶意，但可执行危险能力仍列入风险。\n'
+          addition=(needle + f"- 覆盖补救：首轮有 {rescue.get('retry_target_count',0)} 个部分读取/失败/不可用目标进入扩大上限重扫，"
+                    f"获得 {rescue.get('rescue_result_count',0)} 份重扫结果，其中 {rescue.get('replaced_count',0)} 份优于首轮并替换；"
+                    f"缺失重扫结果 {rescue.get('missing_rescue_result_count',0)}。\n")
+          if needle in report:
+              report=report.replace(needle,addition,1)
+          report_path.write_text(report,encoding='utf-8')
+          assert rescue.get('missing_rescue_result_count')==0
+          assert rescue.get('validation_errors')==[]
+          assert summary['target_count']==2000
+          assert sum(summary['verdict_counts'].values())==2000
+          PY
+      - name: Recompute final hashes after rescue annotation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          p=Path('final-rescued')
+          s_path=p/'dsh_plugins_security_audit_1_2000_summary.json'
+          s=json.loads(s_path.read_text(encoding='utf-8'))
+          names=[
+              'dsh_plugins_security_audit_1_2000_final.md',
+              'dsh_plugins_security_audit_1_2000_coverage.csv',
+              'dsh_plugins_security_audit_1_2000_findings.json',
+              'dsh_plugins_security_audit_1_2000_reviewed_results.json',
+              'dsh_plugins_security_audit_1_2000_source_review.json',
+              'dsh_plugins_audit_1_2000_rescue_summary.json',
+          ]
+          s['artifacts']={name:{
+              'size':(p/name).stat().st_size,
+              'sha256':hashlib.sha256((p/name).read_bytes()).hexdigest(),
+          } for name in names}
+          s_path.write_text(json.dumps(s,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+      - name: Package final rescued report set
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m zipfile -c \
+            final-rescued/dsh_plugins_security_audit_1_2000_final_rescued.zip \
+            final-rescued/dsh_plugins_security_audit_1_2000_final.md \
+            final-rescued/dsh_plugins_security_audit_1_2000_coverage.csv \
+            final-rescued/dsh_plugins_security_audit_1_2000_findings.json \
+            final-rescued/dsh_plugins_security_audit_1_2000_summary.json \
+            final-rescued/dsh_plugins_security_audit_1_2000_source_review.json \
+            final-rescued/dsh_plugins_audit_1_2000_rescue_summary.json
+      - name: Commit final rescued artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p audit-output-final-rescued
+          cp final-rescued/dsh_plugins_security_audit_1_2000_final.md audit-output-final-rescued/
+          cp final-rescued/dsh_plugins_security_audit_1_2000_coverage.csv audit-output-final-rescued/
+          cp final-rescued/dsh_plugins_security_audit_1_2000_findings.json audit-output-final-rescued/
+          cp final-rescued/dsh_plugins_security_audit_1_2000_summary.json audit-output-final-rescued/
+          cp final-rescued/dsh_plugins_security_audit_1_2000_source_review.json audit-output-final-rescued/
+          cp final-rescued/dsh_plugins_audit_1_2000_rescue_summary.json audit-output-final-rescued/
+          cp final-rescued/dsh_plugins_security_audit_1_2000_final_rescued.zip audit-output-final-rescued/
+          printf '%s\n' "$GITHUB_RUN_ID" > audit-output-final-rescued/finalizer-run-id.txt
+          git config user.name 'dsh audit finalizer'
+          git config user.email 'actions@github.com'
+          git add audit-output-final-rescued/
+          git diff --cached --quiet || git commit -m 'audit-output: final reviewed rescued DSH rows 1-2000 report'
+          git pull --rebase origin dsh-audit-1-2000-output
+          git push origin HEAD:dsh-audit-1-2000-output
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-plugins-security-audit-1-2000-final-rescued
+          path: final-rescued/
+          retention-days: 2
+          if-no-files-found: error
