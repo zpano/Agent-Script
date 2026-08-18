@@ -1,0 +1,153 @@
+name: DSH source audit CSV rows 1-2000
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/dsh-audit-1-2000.yml'
+      - 'dsh-audit/**'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dsh-audit-1-2000-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_COMMIT: 4591632cbf97aba66f2b2b81f778f976ab2c3e49
+  SOURCE_URL: https://raw.githubusercontent.com/zp-home/dsh-recommend/4591632cbf97aba66f2b2b81f778f976ab2c3e49/data/registry.json
+  OUTPUT_BRANCH: chatgpt/dsh-audit-output-1-2000-20260819-v2
+  SHARD_COUNT: '100'
+
+jobs:
+  prepare:
+    if: github.head_ref == 'chatgpt/dsh-audit-1-2000-20260819-v2'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download pinned registry snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 6 --retry-all-errors --connect-timeout 20 --max-time 240 \
+            "$SOURCE_URL" -o registry.json
+      - name: Reconstruct immutable CSV rows 1-2000
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 dsh-audit/make_targets.py registry.json targets.jsonl target-manifest.json \
+            --count 2000 --source-url "$SOURCE_URL" --source-commit "$SOURCE_COMMIT"
+          test "$(wc -l < targets.jsonl)" -eq 2000
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-audit-targets
+          path: |
+            targets.jsonl
+            target-manifest.json
+          retention-days: 2
+          if-no-files-found: error
+
+  scan:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dsh-audit-targets
+          path: audit-input
+      - name: Read-only source scan
+        id: scan
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p shard-output
+          python3 dsh-audit/scanner.py \
+            --targets audit-input/targets.jsonl \
+            --output "shard-output/results-${{ matrix.shard }}.jsonl" \
+            --shard "${{ matrix.shard }}" \
+            --shards "$SHARD_COUNT"
+      - name: Preserve partial shard output
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p shard-output
+          touch "shard-output/results-${{ matrix.shard }}.jsonl"
+          printf '{"shard":%s,"step_outcome":"%s"}\n' \
+            "${{ matrix.shard }}" "${{ steps.scan.outcome }}" \
+            > "shard-output/shard-${{ matrix.shard }}-status.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dsh-audit-shard-${{ matrix.shard }}
+          path: shard-output/
+          retention-days: 2
+          if-no-files-found: error
+
+  merge:
+    if: always() && github.head_ref == 'chatgpt/dsh-audit-1-2000-20260819-v2'
+    needs: [prepare, scan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dsh-audit-targets
+          path: audit-input
+      - name: Download all available shard results
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dsh-audit-shard-*
+          path: audit-results
+          merge-multiple: false
+      - name: Merge, validate and render report
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p final-output
+          python3 dsh-audit/merge.py \
+            --targets audit-input/targets.jsonl \
+            --manifest audit-input/target-manifest.json \
+            --results-root audit-results \
+            --output-dir final-output
+          test -f final-output/DONE.json
+          test "$(python3 - <<'PY2'
+          import csv
+          with open('final-output/dsh_plugins_1_2000_coverage.csv', encoding='utf-8-sig', newline='') as f:
+              print(sum(1 for _ in csv.DictReader(f)))
+          PY2
+          )" -eq 2000
+      - name: Commit immutable audit outputs to isolated output branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$OUTPUT_BRANCH" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" output-repo
+          rm -rf output-repo/audit-output/1-2000
+          mkdir -p output-repo/audit-output/1-2000
+          cp -a final-output/. output-repo/audit-output/1-2000/
+          cd output-repo
+          git config user.name "dsh-audit bot"
+          git config user.email "actions@github.com"
+          git add audit-output/1-2000
+          git commit -m "audit-output: DSH CSV rows 1-2000 ${{ github.sha }}" || true
+          git push origin "HEAD:$OUTPUT_BRANCH"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-plugins-1-2000-security-audit
+          path: final-output/
+          retention-days: 2
+          if-no-files-found: error
