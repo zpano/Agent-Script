@@ -1,0 +1,90 @@
+name: Monitor DSH audit standalone v2
+
+on:
+  push:
+    branches:
+      - dsh-audit-1-2000-output
+    paths:
+      - audit/run-v2-monitor-trigger.txt
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dsh-audit-1-2000-output
+          fetch-depth: 0
+      - name: Wait for standalone v2 completion
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/dsh-monitor audit-output-v2
+          selected=''
+          for attempt in $(seq 1 600); do
+            gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow 'DSH audit rows 1-2000 standalone v2' \
+              --branch dsh-audit-1-2000-output \
+              --event push \
+              --limit 20 \
+              --json databaseId,status,conclusion,createdAt,updatedAt,url,headSha \
+              > /tmp/dsh-monitor/runs.json
+            selected="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          values=json.loads(Path('/tmp/dsh-monitor/runs.json').read_text())
+          values=[v for v in values if v.get('createdAt')]
+          print(values[0]['databaseId'] if values else '')
+          PY
+            )"
+            if test -z "$selected"; then
+              sleep 30
+              continue
+            fi
+            gh run view "$selected" --repo "$GITHUB_REPOSITORY" \
+              --json databaseId,status,conclusion,createdAt,updatedAt,url,headSha,jobs \
+              > /tmp/dsh-monitor/run.json
+            state="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          print(json.loads(Path('/tmp/dsh-monitor/run.json').read_text()).get('status',''))
+          PY
+            )"
+            if test "$state" != completed; then
+              sleep 30
+              continue
+            fi
+            break
+          done
+          test -n "$selected"
+          cp /tmp/dsh-monitor/run.json audit-output-v2/workflow-status.json
+          conclusion="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          print(json.loads(Path('/tmp/dsh-monitor/run.json').read_text()).get('conclusion',''))
+          PY
+          )"
+          if test "$conclusion" != success; then
+            gh run view "$selected" --repo "$GITHUB_REPOSITORY" --log-failed \
+              > audit-output-v2/workflow-failed.log 2>&1 || true
+            printf '%s\n' "$selected" > audit-output-v2/failed-run-id.txt
+          fi
+      - name: Commit terminal workflow status
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'dsh audit monitor'
+          git config user.email 'actions@github.com'
+          git add audit-output-v2/workflow-status.json audit-output-v2/workflow-failed.log audit-output-v2/failed-run-id.txt 2>/dev/null || true
+          git diff --cached --quiet && exit 0
+          git commit -m 'audit-output: standalone v2 terminal workflow status'
+          git pull --rebase origin dsh-audit-1-2000-output
+          git push origin HEAD:dsh-audit-1-2000-output
