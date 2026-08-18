@@ -1,0 +1,64 @@
+name: Snapshot DSH audit live status
+
+on:
+  push:
+    branches:
+      - chatgpt/dsh-audit-1-2000-20260818
+    paths:
+      - audit/live-trigger.txt
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chatgpt/dsh-audit-1-2000-20260818
+          fetch-depth: 0
+      - name: Capture workflow and job state
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p audit-output
+          gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow "DSH static audit rows 1-2000" \
+            --branch "chatgpt/dsh-audit-1-2000-20260818" \
+            --event pull_request \
+            --limit 20 \
+            --json databaseId,status,conclusion,createdAt,updatedAt,headSha,url \
+            > audit-output/live-status.json
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          runs = json.loads(Path('audit-output/live-status.json').read_text())
+          details = []
+          for run in runs[:4]:
+              run_id = str(run['databaseId'])
+              proc = subprocess.run(
+                  ['gh', 'run', 'view', run_id, '--repo', os.environ['GITHUB_REPOSITORY'], '--json', 'jobs,status,conclusion,url'],
+                  text=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+              )
+              if proc.returncode == 0:
+                  details.append(json.loads(proc.stdout))
+              else:
+                  details.append({'databaseId': run_id, 'error': proc.stderr[-1000:]})
+          Path('audit-output/live-jobs.json').write_text(json.dumps(details, indent=2) + '\n')
+          PY
+          git config user.name "dsh audit status"
+          git config user.email "actions@github.com"
+          git add audit-output/live-status.json audit-output/live-jobs.json
+          git commit -m "audit-output: snapshot DSH workflow live status"
+          git pull --rebase origin chatgpt/dsh-audit-1-2000-20260818
+          git push origin HEAD:chatgpt/dsh-audit-1-2000-20260818
