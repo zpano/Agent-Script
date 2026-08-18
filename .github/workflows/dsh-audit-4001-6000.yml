@@ -1,0 +1,103 @@
+name: DSH plugin audit 4001-6000
+
+on:
+  push:
+    branches:
+      - dsh-audit-4001-6000-20260818
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  scan:
+    name: scan chunk ${{ matrix.chunk }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk: [0, 1, 2, 3]
+    steps:
+      - name: Checkout audit harness
+        uses: actions/checkout@v4
+
+      - name: Unpack pinned audit harness and target list
+        run: |
+          cat dsh_audit/bundle.part* | base64 -d > /tmp/dsh-audit-bundle.tar.xz
+          echo "c0dd038cd6db8a83bba1e1f6ee9a3c4cf3ecf60ab6347170d0b6d6df8ef0569b  /tmp/dsh-audit-bundle.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/dsh-audit-bundle.tar.xz
+
+      - name: Static-scan public repositories as data
+        env:
+          GH_READ_TOKEN: ${{ github.token }}
+        run: |
+          python3 dsh_audit/dsh_audit.py scan \
+            --targets dsh_audit/targets.csv \
+            --chunk-index "${{ matrix.chunk }}" \
+            --chunk-count 4 \
+            --workers 4 \
+            --outdir "out/${{ matrix.chunk }}"
+
+      - name: Upload partial result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: partial-${{ matrix.chunk }}
+          path: out/${{ matrix.chunk }}
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: merge and verify all 2000 rows
+    needs: scan
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout audit harness
+        uses: actions/checkout@v4
+
+      - name: Unpack pinned audit harness and target list
+        run: |
+          cat dsh_audit/bundle.part* | base64 -d > /tmp/dsh-audit-bundle.tar.xz
+          echo "c0dd038cd6db8a83bba1e1f6ee9a3c4cf3ecf60ab6347170d0b6d6df8ef0569b  /tmp/dsh-audit-bundle.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/dsh-audit-bundle.tar.xz
+
+      - name: Download partial results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: partial-*
+          path: partials
+          merge-multiple: true
+
+      - name: Merge, fill missing rows explicitly, and generate reports
+        run: |
+          python3 dsh_audit/dsh_audit.py merge \
+            --input partials \
+            --outdir final
+          python3 - <<'PY'
+          import csv, json
+          from pathlib import Path
+          p = Path('final/dsh_plugins_4001_6000_full_ledger.csv')
+          rows = list(csv.DictReader(p.open(encoding='utf-8-sig')))
+          ords = [int(r['ordinal']) for r in rows]
+          assert len(rows) == 2000, len(rows)
+          assert len(set(ords)) == 2000, 'duplicate ordinals'
+          assert min(ords) == 4001 and max(ords) == 6000
+          assert set(ords) == set(range(4001, 6001)), 'missing ordinal'
+          summary = json.loads(Path('final/SUMMARY.json').read_text())
+          assert summary['total'] == 2000
+          print(json.dumps(summary, ensure_ascii=False, indent=2))
+          PY
+
+      - name: Upload final report bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-audit-4001-6000
+          path: final
+          if-no-files-found: error
+          retention-days: 1
