@@ -1,0 +1,103 @@
+name: Repair DSH audit standalone v2
+
+on:
+  push:
+    branches:
+      - dsh-audit-1-2000-output
+    paths:
+      - audit/run-v2-repair-trigger.txt
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dsh-audit-1-2000-output
+          fetch-depth: 0
+      - name: Wait, then rerun only failed jobs up to three times
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/dsh-repair audit-output-v2
+          run_id=''
+          for attempt in $(seq 1 600); do
+            run_id="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow 'DSH audit rows 1-2000 standalone v2' \
+              --branch dsh-audit-1-2000-output \
+              --event push \
+              --limit 20 \
+              --json databaseId,createdAt \
+              --jq '.[0].databaseId // ""')"
+            test -n "$run_id" && break
+            sleep 30
+          done
+          test -n "$run_id"
+
+          wait_terminal() {
+            local id="$1"
+            for n in $(seq 1 600); do
+              gh run view "$id" --repo "$GITHUB_REPOSITORY" \
+                --json status,conclusion,databaseId,url,attempt,createdAt,updatedAt,jobs \
+                > /tmp/dsh-repair/current.json
+              state="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          print(json.loads(Path('/tmp/dsh-repair/current.json').read_text()).get('status',''))
+          PY
+              )"
+              test "$state" = completed && return 0
+              sleep 30
+            done
+            return 1
+          }
+
+          for repair_round in 0 1 2 3; do
+            wait_terminal "$run_id"
+            conclusion="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          print(json.loads(Path('/tmp/dsh-repair/current.json').read_text()).get('conclusion',''))
+          PY
+            )"
+            if test "$conclusion" = success; then
+              break
+            fi
+            if test "$repair_round" = 3; then
+              break
+            fi
+            gh run rerun "$run_id" --failed --repo "$GITHUB_REPOSITORY"
+            sleep 15
+          done
+
+          cp /tmp/dsh-repair/current.json audit-output-v2/repair-status.json
+          printf '%s\n' "$run_id" > audit-output-v2/repair-run-id.txt
+          final_conclusion="$(python - <<'PY'
+          import json
+          from pathlib import Path
+          print(json.loads(Path('/tmp/dsh-repair/current.json').read_text()).get('conclusion',''))
+          PY
+          )"
+          if test "$final_conclusion" != success; then
+            gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --log-failed \
+              > audit-output-v2/repair-failed.log 2>&1 || true
+          fi
+      - name: Commit repair outcome
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'dsh audit repair'
+          git config user.email 'actions@github.com'
+          git add audit-output-v2/repair-status.json audit-output-v2/repair-run-id.txt audit-output-v2/repair-failed.log 2>/dev/null || true
+          git diff --cached --quiet && exit 0
+          git commit -m 'audit-output: standalone v2 repair outcome'
+          git pull --rebase origin dsh-audit-1-2000-output
+          git push origin HEAD:dsh-audit-1-2000-output
