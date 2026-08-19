@@ -1,0 +1,146 @@
+name: temporary DSH source audit rows 1-2000
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Download the exact deduplicated CSV snapshot
+        uses: actions/download-artifact@v4
+        with:
+          name: github-dsh-plugins-deduplicated
+          path: source
+          repository: zpano/Agent-Script
+          run-id: 32155573997
+          github-token: ${{ github.token }}
+      - name: Materialize frozen input and audit tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum source/github_dsh_plugins_deduplicated.csv | awk '{print $1}')" = "5852f4f8aa21582096b445f969609cb68b83fbb8e009c7dab3dfd89266afd5b7"
+          mkdir -p bundle/tools bundle/data
+          cat .audit_payload/scanner.*.b64 | base64 -d | gzip -d > bundle/tools/dsh_audit_scanner.py
+          cat .audit_payload/aggregate.*.b64 | base64 -d | gzip -d > bundle/tools/dsh_audit_aggregate.py
+          python3 -m py_compile bundle/tools/dsh_audit_scanner.py bundle/tools/dsh_audit_aggregate.py
+          python3 - <<'PY'
+          import csv, json
+          source = 'source/github_dsh_plugins_deduplicated.csv'
+          output = 'bundle/data/dsh_audit_rows_1_2000.jsonl'
+          with open(source, encoding='utf-8-sig', newline='') as handle:
+              rows = list(csv.DictReader(handle))
+          selected = rows[:2000]
+          if len(selected) != 2000:
+              raise SystemExit(f'expected 2000 rows, got {len(selected)}')
+          if selected[0]['url'] != 'https://github.com/deepseek-ai/deepseek-harness':
+              raise SystemExit('unexpected first row')
+          if selected[-1]['url'] != 'https://github.com/KnCRJVirX/dsh-desktop':
+              raise SystemExit('unexpected row 2000')
+          with open(output, 'w', encoding='utf-8') as handle:
+              for index, row in enumerate(selected, start=1):
+                  handle.write(json.dumps({
+                      'index': index,
+                      'name': row.get('name', ''),
+                      'url': row.get('url', ''),
+                      'description': row.get('description', ''),
+                      'star': int(row.get('star') or 0),
+                      'fork': int(row.get('fork') or 0),
+                  }, ensure_ascii=False) + '\n')
+          PY
+          test "$(wc -l < bundle/data/dsh_audit_rows_1_2000.jsonl)" -eq 2000
+          sha256sum bundle/tools/* bundle/data/* source/github_dsh_plugins_deduplicated.csv
+      - name: Upload frozen audit bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-audit-bundle
+          path: bundle/
+          retention-days: 1
+          if-no-files-found: error
+
+  scan:
+    name: scan shard ${{ matrix.shard }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - name: Download frozen audit bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: dsh-audit-bundle
+          path: bundle
+      - name: Configure Git for public partial clones
+        shell: bash
+        run: |
+          git config --global advice.detachedHead false
+          git config --global core.longpaths true
+          git config --global protocol.version 2
+      - name: Audit assigned repositories
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -euo pipefail
+          mkdir -p audit-output
+          python3 bundle/tools/dsh_audit_scanner.py \
+            --input bundle/data/dsh_audit_rows_1_2000.jsonl \
+            --out audit-output \
+            --shard "${{ matrix.shard }}" \
+            --shards 20
+      - name: Upload shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-audit-shard-${{ matrix.shard }}
+          path: audit-output/
+          retention-days: 1
+          if-no-files-found: error
+
+  aggregate:
+    name: validate coverage and build candidate report
+    needs: [prepare, scan]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download frozen audit bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: dsh-audit-bundle
+          path: bundle
+      - name: Download all shard evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dsh-audit-shard-*
+          path: shards
+          merge-multiple: true
+      - name: Merge, validate all 2000 indices, and render report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 bundle/tools/dsh_audit_aggregate.py \
+            --input-dir shards \
+            --out-dir final \
+            --expected 2000
+      - name: Upload complete audit artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-audit-rows-1-2000-complete
+          path: final/
+          retention-days: 1
+          if-no-files-found: error
